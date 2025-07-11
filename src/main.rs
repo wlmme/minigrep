@@ -9,10 +9,6 @@ struct Config {
     #[arg(short = 'i', long, help = "Ignore case", action = clap::ArgAction::SetTrue)]
     ignore_case: bool,
     
-    /// Multi-threaded parallel search, default disabled
-    #[arg(short = 'p', long, help = "Multi-threaded parallel search", action = clap::ArgAction::SetTrue)]
-    parallel: bool,
-    
     /// Recursive search, default disabled
     #[arg(short = 'r', long, help = "Recursive search", action = clap::ArgAction::SetTrue)]
     recursive: bool,
@@ -38,12 +34,11 @@ fn main() -> Result<()> {
             format!("{:?}", config.path.unwrap())
         }
     );
-    let rules_enabled = config.ignore_case || config.recursive || config.parallel;
+    let rules_enabled = config.ignore_case || config.recursive;
     let rules_enabled_str = if rules_enabled {
-        format!(" under the rules:\n - {}\n - {}\n - {}\n",
+        format!(" under the rules:\n - {}\n - {}\n",
            if config.ignore_case { "ignore case" } else { "case sensitive" },
-           if config.recursive { "recursive" } else { "non-recursive" },
-           if config.parallel { "parallel" } else { "sequential" })
+           if config.recursive { "recursive" } else { "non-recursive" })
     } else {
         "".to_string()
     };
