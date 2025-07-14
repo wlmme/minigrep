@@ -1,37 +1,22 @@
-
 use anyhow::{Context, Result};
 use clap::Parser;
+use minigrep::{greps, Config, GrepError};
 
-#[derive(Parser)]
-#[command(about = "A simple grep tool", long_about = "A simple grep tool used to search for matching text in files, supports regular expressions, supports multi-threaded parallel search, supports recursive search.")]
-struct Config {
-    /// Ignore case, default enabled
-    #[arg(short = 'i', long, help = "Ignore case", action = clap::ArgAction::SetTrue)]
-    ignore_case: bool,
-    
-    /// Recursive search, default disabled
-    #[arg(short = 'r', long, help = "Recursive search", action = clap::ArgAction::SetTrue)]
-    recursive: bool,
-    
-    /// Matching expression
-    #[arg(help = "Matching expression")]
-    pattern: String,
-    
-    /// Multiple paths separated by spaces, default is to search the current directory
-    #[arg(help = "Multiple paths separated by spaces, default is to search the current directory")]
-    path: Option<Vec<String>>,
-}
-
+/// Main function
+/// 
+/// This function is the entry point of the program. It parses the command-line arguments,
+/// initializes the configuration, and starts the search process.
 fn main() -> Result<()> {
     // get the config (cli app arguments)
     let config = Config::parse();
 
+    // search prompt
     print!("Searching {:?} in paths: {}",
         config.pattern,
         if config.path.is_none() || config.path.clone().unwrap().is_empty() {
             "[CURRENT DIRECTORY]".to_string()
         } else {
-            format!("{:?}", config.path.unwrap())
+            format!("{:?}", config.path)
         }
     );
     let rules_enabled = config.ignore_case || config.recursive;
@@ -44,5 +29,8 @@ fn main() -> Result<()> {
     };
     println!("{}", rules_enabled_str);
     
+    // call grep function in lib.rs
+    greps(&config)?;
+
     Ok(())
 }
