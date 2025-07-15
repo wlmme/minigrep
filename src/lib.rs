@@ -10,6 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 pub use args::Config;
 pub use error::GrepError;
+use rand::seq::IndexedRandom;
 use std::io::{BufRead, Read};
 
 /// Searches for a pattern in a file or directory.
@@ -119,7 +120,7 @@ fn search_in_file(re: &regex::Regex, path: &PathBuf) -> Result<()> {
             )
         })?;
         if re.is_match(&line) {
-            println!("#{}: {}", line_number + 1, line);
+            println!("#{}: {}", line_number + 1, highlight_line(&line, re));
         }
     }
     Ok(())
@@ -229,5 +230,44 @@ fn is_likely_text_file(path: &PathBuf) -> Result<bool> {
 fn looks_like_text(data: &[u8]) -> bool {
     let printable = data.iter().filter(|&&b| b.is_ascii_graphic() || b == b' ' || b == b'\n' || b == b'\r').count();
     printable as f32 / data.len() as f32 > 0.95
+}
+
+/// Highlight a line of text using a regular expression.
+/// 
+/// This function takes a line of text and a regular expression, and returns a new string with the matches highlighted.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use minigrep::highlight_line;
+/// 
+/// let line = "Hello, world!";
+/// let re = regex::Regex::new(r"world").unwrap();
+/// let result = highlight_line(line, &re);
+/// assert_eq!(result, "Hello, \x1b[31mworld\x1b[0m!");
+/// ```
+fn highlight_line(line: &str, re: &regex::Regex) -> String {
+    let mut highlighted = String::new();
+    let mut last_end = 0;
+    let colors = vec!["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[37m", "\x1b[97m"];
+    let mut rng = rand::rng();
+    for (i, cap) in re.find_iter(line).enumerate() {
+        let start = cap.start();
+        let end = cap.end();
+        
+        // keep unmatched beginnings
+        highlighted.push_str(&line[last_end..start]);
+        
+        // hilight the matched section
+        highlighted.push_str(&colors.choose(&mut rng).unwrap());
+        highlighted.push_str(&line[start..end]);
+        highlighted.push_str("\x1b[0m");
+        last_end = end;
+    }
+    
+    // add remaining text
+    highlighted.push_str(&line[last_end..]);
+    
+    highlighted
 }
 
