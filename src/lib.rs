@@ -251,7 +251,7 @@ fn highlight_line(line: &str, re: &regex::Regex) -> String {
     let mut last_end = 0;
     let colors = vec!["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[37m", "\x1b[97m"];
     let mut rng = rand::rng();
-    for (i, cap) in re.find_iter(line).enumerate() {
+    for (_i, cap) in re.find_iter(line).enumerate() {
         let start = cap.start();
         let end = cap.end();
         
