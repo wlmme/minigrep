@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use clap::Parser;
-use minigrep::{greps, Config, GrepError};
+use minigrep::{greps, Config};
 
 /// Main function
 /// 
@@ -16,12 +16,12 @@ fn main() -> Result<()> {
         if config.path.is_none() || config.path.clone().unwrap().is_empty() {
             "[CURRENT DIRECTORY]".to_string()
         } else {
-            format!("{:?}", config.path)
+            format!("{:?}", config.path.clone().unwrap())
         }
     );
     let rules_enabled = config.ignore_case || config.recursive;
     let rules_enabled_str = if rules_enabled {
-        format!(" under the rules:\n - {}\n - {}\n",
+        format!(" withing the rules:\n - {}\n - {}\n",
            if config.ignore_case { "ignore case" } else { "case sensitive" },
            if config.recursive { "recursive" } else { "non-recursive" })
     } else {

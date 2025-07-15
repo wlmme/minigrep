@@ -1,12 +1,16 @@
 mod args;
 mod error;
 
-use std::{fs::File, io::{BufReader, ErrorKind}, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufReader, ErrorKind},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 pub use args::Config;
 pub use error::GrepError;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 
 /// Searches for a pattern in a file or directory.
 ///
@@ -29,8 +33,10 @@ pub fn greps<'a>(config: &'a Config) -> Result<()> {
     let recursive = config.recursive;
 
     // convert pattern to regex
-    let regex_pattern = regex::Regex::new(pattern).context("pattern is invalid")?;
-
+    let regex_pattern = regex::RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .context("pattern is invalid")?;
     // if path is None then search current directory else search in the given path
     if path.is_none() {
         let current_dir = std::env::current_dir().context("failed to get current directory")?;
@@ -64,6 +70,7 @@ pub fn greps<'a>(config: &'a Config) -> Result<()> {
 ///
 /// This function takes a regular expression and a file path as input and searches for the pattern in the file.
 /// If the pattern is found, it prints the file path and the line number along with the matched line.
+/// This function will skip binary files to avoid UTF-8 encoding errors.
 ///
 /// # Examples
 ///
@@ -80,6 +87,13 @@ pub fn greps<'a>(config: &'a Config) -> Result<()> {
 ///
 /// This function will return an error if the file cannot be read or if the regular expression is invalid.
 fn search_in_file(re: &regex::Regex, path: &PathBuf) -> Result<()> {
+    println!("\nScanning file: {}", path.display());
+
+    // Check if file is likely to be a text file by reading first few bytes
+    if !is_likely_text_file(path)? {
+        return Ok(());
+    }
+    
     let file = File::open(path)
         .map_err(|e| match e.kind() {
             ErrorKind::NotFound => GrepError::FileNotFound {
@@ -105,7 +119,7 @@ fn search_in_file(re: &regex::Regex, path: &PathBuf) -> Result<()> {
             )
         })?;
         if re.is_match(&line) {
-            println!("{}:{}: {}", path.display(), line_number + 1, line);
+            println!("#{}: {}", line_number + 1, line);
         }
     }
     Ok(())
@@ -176,3 +190,44 @@ fn search_in_directory(regex: &regex::Regex, path: &PathBuf, recursive: bool) ->
     }
     Ok(())
 }
+
+/// Check if a file looks like UTF-8 encoded text.
+/// 
+/// This function reads the first 1KB of the file and checks if it can be decoded as UTF-8.
+/// If not, it falls back to a heuristic that checks if the file contains a high proportion of printable characters.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use minigrep::is_likely_text_file;
+/// 
+/// let path = PathBuf::from("example");
+/// let result = is_likely_text_file(&path);
+/// assert!(result.is_ok());
+/// ```
+fn is_likely_text_file(path: &PathBuf) -> Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = vec![0; 1024]; // 采样前 1KB 内容
+    let n = file.read(&mut buffer)?;
+    Ok(std::str::from_utf8(&buffer[..n]).is_ok() || looks_like_text(&buffer[..n]))
+}
+
+/// Check if a file looks like text.
+/// 
+/// This function reads the first 1KB of the file and checks if it can be decoded as UTF-8.
+/// If not, it falls back to a heuristic that checks if the file contains a high proportion of printable characters.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use minigrep::looks_like_text;
+/// 
+/// let path = PathBuf::from("example");
+/// let result = looks_like_text(&path);
+/// assert!(result.is_ok());
+/// ```
+fn looks_like_text(data: &[u8]) -> bool {
+    let printable = data.iter().filter(|&&b| b.is_ascii_graphic() || b == b' ' || b == b'\n' || b == b'\r').count();
+    printable as f32 / data.len() as f32 > 0.95
+}
+
