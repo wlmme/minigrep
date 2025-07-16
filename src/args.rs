@@ -16,6 +16,14 @@ pub struct Config {
     /// Recursive search, default disabled
     #[arg(short = 'r', long, help = "Recursive search", action = clap::ArgAction::SetTrue)]
     pub recursive: bool,
+    
+    /// Number of threads to use for parallel search, default is 1
+    #[arg(short = 't', long, help = "Number of threads to use for parallel search", default_value_t = 1)]
+    pub threads: usize,
+    
+    /// Maximum file size in MB, default is unlimited
+    #[arg(short = 's', long, help = "Maximum file size in MB, default is unlimited", default_value_t = usize::MAX)]
+    pub max_file_size: usize,
 
     /// Matching expression
     #[arg(help = "Matching expression")]

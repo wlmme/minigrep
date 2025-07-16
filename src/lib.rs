@@ -1,17 +1,60 @@
 mod args;
 mod error;
+mod utils;
 
 use std::{
     fs::File,
-    io::{BufReader, ErrorKind},
+    io::BufReader,
     path::PathBuf,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Ok, Result};
 pub use args::Config;
 pub use error::GrepError;
-use rand::seq::IndexedRandom;
-use std::io::{BufRead, Read};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::io::BufRead;
+
+/// Represents information about a file.
+/// 
+/// This struct contains the path to the file and its size.
+#[derive(Debug, Clone)]
+struct FileInfo {
+    /// Path to the file.
+    path: PathBuf,
+    /// Size of the file in bytes.
+    size: u64,
+}
+
+impl FileInfo {
+    /// Creates a new `FileInfo` instance.
+    fn new(path: PathBuf, size: u64) -> Self {
+        Self { path, size }
+    }
+}
+
+/// Represents the result of a search.
+/// 
+/// This struct contains the path to the file, the line number, and the line itself.
+#[derive(Debug, Clone)]
+struct SearchResult {
+    /// Path to the file.
+    path: PathBuf,
+    /// Line number in the file.
+    line_number: u64,
+    /// Line content.
+    line: String,
+}
+
+impl SearchResult {
+    /// Creates a new `SearchResult` instance.
+    fn new(path: PathBuf, line_number: u64, line: String) -> Self {
+        Self {
+            path,
+            line_number,
+            line,
+        }
+    }
+}
 
 /// Searches for a pattern in a file or directory.
 ///
@@ -32,242 +75,181 @@ pub fn greps<'a>(config: &'a Config) -> Result<()> {
     let path = config.path.as_ref().or(None);
     let ignore_case = config.ignore_case;
     let recursive = config.recursive;
+    let thread_count = if config.threads == 0 {
+        num_cpus::get()
+    } else {
+        config.threads
+    };
+    let max_file_size = config.max_file_size;
+    
+    // println!("Initializing parallel...");
+    // setting rayon thread pool
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build_global()
+        .context("Failed to initialize thread pool")?;
 
+    // println!("Assembling pattern...")
     // convert pattern to regex
     let regex_pattern = regex::RegexBuilder::new(pattern)
         .case_insensitive(ignore_case)
         .build()
-        .context("pattern is invalid")?;
+        .context("Pattern is invalid")?;
+    
+    // println!("Collecting files...");
+    let mut files = Vec::new();
     // if path is None then search current directory else search in the given path
-    if path.is_none() {
+    if path.is_none() || path.unwrap().is_empty() {
         let current_dir = std::env::current_dir().context("failed to get current directory")?;
         let path = PathBuf::from(current_dir);
-        search_in_directory(&regex_pattern, &path, recursive)?;
+        utils::collect_files(&path, recursive, max_file_size, &mut files)?;
     } else {
-        let paths: Vec<PathBuf> = path
-            .unwrap()
+        let paths: Vec<PathBuf> = path.unwrap()
             .iter()
             .map(|s| -> PathBuf { PathBuf::from(s) })
             .collect();
-        if paths.is_empty() {
-            // if no path is provided, search current directory
-            let current_dir = std::env::current_dir().context("failed to get current directory")?;
-            let path = PathBuf::from(current_dir);
-            search_in_directory(&regex_pattern, &path, recursive)?;
-        }
         for path in paths {
-            if path.is_file() {
-                search_in_directory(&regex_pattern, &path, recursive)?;
-            } else if path.is_dir() {
-                search_in_directory(&regex_pattern, &path, recursive)?;
-            }
+            utils::collect_files(&path, recursive, max_file_size, &mut files)?;
         }
     }
-
-    Ok(())
-}
-
-/// Search for a pattern in a file.
-///
-/// This function takes a regular expression and a file path as input and searches for the pattern in the file.
-/// If the pattern is found, it prints the file path and the line number along with the matched line.
-/// This function will skip binary files to avoid UTF-8 encoding errors.
-///
-/// # Examples
-///
-/// ```
-/// use minigrep::search_in_file;
-///
-/// let regex_pattern = regex::Regex::new(r"pattern").unwrap();
-/// let path = PathBuf::from("path/to/file");
-///
-/// search_in_file(&regex_pattern, &path).unwrap();
-/// ```
-///
-/// # Errors
-///
-/// This function will return an error if the file cannot be read or if the regular expression is invalid.
-fn search_in_file(re: &regex::Regex, path: &PathBuf) -> Result<()> {
-    println!("\nScanning file: {}", path.display());
-
-    // Check if file is likely to be a text file by reading first few bytes
-    if !is_likely_text_file(path)? {
+    
+    // if no files are found then print message and return
+    if files.is_empty() {
+        println!("No files found to search.");
         return Ok(());
     }
     
-    let file = File::open(path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::NotFound => GrepError::FileNotFound {
-                path: path.display().to_string(),
-            },
-            ErrorKind::PermissionDenied => GrepError::PermissionDenied {
-                path: path.display().to_string(),
-            },
-            _ => GrepError::FileReadError {
-                path: path.display().to_string(),
-            },
+    // parallel searching files
+    let results: Vec<SearchResult> = files.par_iter()
+        .filter_map(|file_info| {
+            search_file_parallel(&regex_pattern, file_info).ok()
         })
-        .with_context(|| format!("failed to open file {}", path.display()))?;
-    let capacity = determine_capacity(path)
-        .with_context(|| format!("failed to get capacity for file {}", path.display()))?;
-    let file_reader = BufReader::with_capacity(capacity, file);
-    for (line_number, line) in file_reader.lines().enumerate() {
-        let line = line.with_context(|| {
-            format!(
-                "failed to read line {} in file {}",
-                line_number + 1,
-                path.display()
-            )
-        })?;
+        .flatten()
+        .collect();
+
+    // sort results by file path and line number
+    let mut sorted_results = results;
+    sorted_results.sort_by(|a, b| {
+        a.path.cmp(&b.path).then(a.line_number.cmp(&b.line_number))
+    });
+
+    // print results
+    for result in sorted_results {
+        println!("{}:\x1b[41;31m[{}]\x1b[0m:{}", result.path.display(), result.line_number, result.line);
+    }
+
+    Ok(())
+}
+
+/// Search a file in parallel using multiple threads.
+/// 
+/// This function uses the `rayon` crate to parallelize the search operation.
+/// 
+/// # Arguments
+/// 
+/// * `re` - The regular expression pattern to search for.
+/// * `file_info` - The file information to search.
+/// * `max_file_size` - The maximum file size to search.
+/// 
+/// # Returns
+/// 
+/// A `Result` containing a vector of search results.
+/// 
+/// # Errors
+/// 
+/// Returns an error if the file cannot be opened or read.
+/// 
+/// #Examples
+/// 
+/// ```
+/// use minigrep::search_file_parallel;
+/// use regex::Regex;
+/// use std::fs::File;
+/// use std::path::Path;
+/// 
+/// let regex_pattern = Regex::new(r"hello").unwrap();
+/// let file_info = FileInfo::new(File::open(Path::new("example.txt")).unwrap(), 1024);
+/// let max_file_size = 1024 * 1024;
+/// 
+/// let results = search_file_parallel(&regex_pattern, &file_info, max_file_size);
+/// assert!(results.is_ok());
+/// ```
+fn search_file_parallel(re: &regex::Regex, file_info: &FileInfo) -> Result<Vec<SearchResult>>{
+    let mut results = Vec::new();
+    if file_info.size > 1024 * 1024 {
+        search_file_with_mmap(re, file_info, &mut results)?;
+    } else {
+        search_file_buffered(re, file_info, &mut results)?;
+    }
+    Ok(results)
+}
+
+
+/// Search file using buffered reader
+/// 
+/// This function searches a file using a buffered reader and returns a vector of search results.
+/// 
+/// # Arguments
+/// 
+/// * `re` - A reference to a regular expression used for searching.
+/// * `file_info` - A reference to a `FileInfo` struct containing information about the file.
+/// * `results` - A mutable reference to a vector of `SearchResult` structs where the search results will be stored.
+/// 
+/// # Returns
+/// 
+/// A `Result` indicating success or failure.
+/// 
+/// # Errors
+/// 
+/// This function will return an error if:
+/// * The file cannot be opened.
+/// * The file size cannot be determined.
+/// * The file cannot be read.
+/// * The file cannot be closed.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use minigrep::search_file_buffered;
+/// use minigrep::FileInfo;
+/// use minigrep::SearchResult;
+/// 
+/// let re = regex::Regex::new(r"hello").unwrap();
+/// let file_info = FileInfo::new("path/to/file.txt");
+/// let mut results = Vec::new();
+/// 
+/// search_file_buffered(&re, &file_info, &mut results).unwrap();
+/// assert_eq!(results.len(), 1);
+/// ```
+fn search_file_buffered(re: &regex::Regex, file_info: &FileInfo, results: &mut Vec<SearchResult>) -> Result<()> {
+    let file = File::open(&file_info.path)
+        .with_context(|| format!("Failed to open file {}", file_info.path.display()))?;
+    let capacity = utils::determine_capacity(&file_info.path)?;
+    let reader = BufReader::with_capacity(capacity, file);
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line.with_context( || format!("Failed to read line #{} in file {}", line_number + 1, file_info.path.display()))?;
         if re.is_match(&line) {
-            println!("#{}: {}", line_number + 1, highlight_line(&line, re));
+            results.push(SearchResult::new(file_info.path.clone(), (line_number + 1) as u64, utils::highlight_line(&line, re)));
         }
     }
     Ok(())
 }
 
-/// Determine the capacity for a file based on its size.
-///
-/// # Errors
-///
-/// This function will return an error if the file cannot be read or if the regular expression is invalid.
-///
-/// # Examples
-///
-/// ```
-/// use std::path::PathBuf;
-/// use minigrep::determine_capacity;
-///
-/// let path = PathBuf::from("example.txt");
-/// let capacity = determine_capacity(&path);
-/// assert!(capacity.is_ok());
-/// ```
-fn determine_capacity(path: &PathBuf) -> Result<usize> {
-    let metadata = path
-        .metadata()
-        .with_context(|| format!("failed to get metadata for file {}", path.display()))?;
-    let file_size = metadata.len();
-    let capacity = match file_size {
-        0..=16384 => 4 * 1024,
-        16385..=524288 => 32 * 1024,
-        _ => 128 * 1024,
-    };
-    Ok(capacity)
-}
-
-/// Search for a regular expression in a directory files.
-///
-/// This function will search for a regular expression in all files within a directory and its subdirectories.
-///
-/// # Errors
-///
-/// This function will return an error if the directory cannot be read or if the regular expression is invalid.
-///
-/// # Examples
-///
-/// ```
-/// use std::path::PathBuf;
-/// use minigrep::search_in_directory;
-///
-/// let path = PathBuf::from("example");
-/// let regex = regex::Regex::new(r"example").unwrap();
-/// let result = search_in_directory(&regex, &path, true);
-/// assert!(result.is_ok());
-/// ```
-fn search_in_directory(regex: &regex::Regex, path: &PathBuf, recursive: bool) -> Result<()> {
-    let entries = std::fs::read_dir(path)
-        .with_context(|| format!("failed to read directory {}", path.display()))?;
-    for entry in entries {
-        let entry = entry
-            .with_context(|| format!("failed to read entry in directory {}", path.display()))?;
-        let path = entry.path();
-        if path.is_dir() && recursive {
-            search_in_directory(regex, &path, recursive)?;
-        } else if path.is_file() {
-            search_in_file(regex, &path)?;
-        } else {
-            // Ignore non-file entries, such as symbolic links.
+fn search_file_with_mmap(re: &regex::Regex, file_info: &FileInfo, results: &mut Vec<SearchResult>) -> Result<()> {
+    let file = File::open(&file_info.path)
+        .with_context(|| format!("Failed to open file {}", file_info.path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("Failed to map file {}", file_info.path.display()))?;
+    // check if the file is likely to be text content
+    if !utils::is_likely_text_content(&mmap[..std::cmp::min(512, mmap.len())]) {
+        return Ok(());
+    }
+    let content = String::from_utf8_lossy(&mmap);
+    for (line_number, line) in content.lines().enumerate() {
+        if re.is_match(line) {
+            results.push(SearchResult::new(file_info.path.clone(), (line_number + 1) as u64, utils::highlight_line(line, re)));
         }
     }
     Ok(())
-}
-
-/// Check if a file looks like UTF-8 encoded text.
-/// 
-/// This function reads the first 1KB of the file and checks if it can be decoded as UTF-8.
-/// If not, it falls back to a heuristic that checks if the file contains a high proportion of printable characters.
-/// 
-/// # Examples
-/// 
-/// ```
-/// use minigrep::is_likely_text_file;
-/// 
-/// let path = PathBuf::from("example");
-/// let result = is_likely_text_file(&path);
-/// assert!(result.is_ok());
-/// ```
-fn is_likely_text_file(path: &PathBuf) -> Result<bool> {
-    let mut file = std::fs::File::open(path)?;
-    let mut buffer = vec![0; 1024]; // 采样前 1KB 内容
-    let n = file.read(&mut buffer)?;
-    Ok(std::str::from_utf8(&buffer[..n]).is_ok() || looks_like_text(&buffer[..n]))
-}
-
-/// Check if a file looks like text.
-/// 
-/// This function reads the first 1KB of the file and checks if it can be decoded as UTF-8.
-/// If not, it falls back to a heuristic that checks if the file contains a high proportion of printable characters.
-/// 
-/// # Examples
-/// 
-/// ```
-/// use minigrep::looks_like_text;
-/// 
-/// let path = PathBuf::from("example");
-/// let result = looks_like_text(&path);
-/// assert!(result.is_ok());
-/// ```
-fn looks_like_text(data: &[u8]) -> bool {
-    let printable = data.iter().filter(|&&b| b.is_ascii_graphic() || b == b' ' || b == b'\n' || b == b'\r').count();
-    printable as f32 / data.len() as f32 > 0.95
-}
-
-/// Highlight a line of text using a regular expression.
-/// 
-/// This function takes a line of text and a regular expression, and returns a new string with the matches highlighted.
-/// 
-/// # Examples
-/// 
-/// ```
-/// use minigrep::highlight_line;
-/// 
-/// let line = "Hello, world!";
-/// let re = regex::Regex::new(r"world").unwrap();
-/// let result = highlight_line(line, &re);
-/// assert_eq!(result, "Hello, \x1b[31mworld\x1b[0m!");
-/// ```
-fn highlight_line(line: &str, re: &regex::Regex) -> String {
-    let mut highlighted = String::new();
-    let mut last_end = 0;
-    let colors = vec!["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[37m", "\x1b[97m"];
-    let mut rng = rand::rng();
-    for (_i, cap) in re.find_iter(line).enumerate() {
-        let start = cap.start();
-        let end = cap.end();
-        
-        // keep unmatched beginnings
-        highlighted.push_str(&line[last_end..start]);
-        
-        // hilight the matched section
-        highlighted.push_str(&colors.choose(&mut rng).unwrap());
-        highlighted.push_str(&line[start..end]);
-        highlighted.push_str("\x1b[0m");
-        last_end = end;
-    }
-    
-    // add remaining text
-    highlighted.push_str(&line[last_end..]);
-    
-    highlighted
 }
 
